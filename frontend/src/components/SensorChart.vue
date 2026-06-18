@@ -208,13 +208,19 @@ const handleResize = () => {
   }
 }
 
-watch(() => props.cage, () => {
-  if (chartInstance) {
-    loadHistoryData()
+let currentCageId = null
+
+watch(() => props.cage, (newCage) => {
+  if (newCage && newCage.id !== currentCageId) {
+    currentCageId = newCage.id
+    if (chartInstance) {
+      loadHistoryData()
+    }
   }
 })
 
 onMounted(() => {
+  currentCageId = props.cage ? props.cage.id : null
   nextTick(() => {
     initChart()
   })
@@ -223,6 +229,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener('resize', handleResize)
+  currentCageId = null
   if (chartInstance) {
     chartInstance.dispose()
     chartInstance = null

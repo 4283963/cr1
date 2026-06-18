@@ -16,7 +16,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, watch, computed } from 'vue'
+import { ref, onMounted, onUnmounted, watch } from 'vue'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 
@@ -34,14 +34,204 @@ const hoveredCage = ref(null)
 const tooltipStyle = ref({ left: '0px', top: '0px' })
 
 let scene, camera, renderer, controls, raycaster, mouse
-let cageMeshes = []
+let cageMeshes = new Map()
 let animationId = null
 let waterSurface = null
+let sharedGeometries = null
+let sharedMaterials = null
+let onMouseMoveHandler = null
+let onClickHandler = null
+let onResizeHandler = null
 
 const statusColors = {
   normal: 0x4caf50,
   warning: 0xff9800,
   error: 0xf44336
+}
+
+const initSharedResources = () => {
+  const cageWidth = 8
+  const cageHeight = 4
+  const cageDepth = 8
+
+  sharedGeometries = {
+    frame: new THREE.BoxGeometry(cageWidth, cageHeight, cageDepth),
+    net: new THREE.BoxGeometry(cageWidth - 0.2, cageHeight - 0.2, cageDepth - 0.2),
+    buoy: new THREE.CylinderGeometry(0.5, 0.6, 1.5, 8),
+    rope: new THREE.CylinderGeometry(0.05, 0.05, 5, 4),
+    sensor: new THREE.SphereGeometry(0.6, 16, 16)
+  }
+
+  sharedMaterials = {
+    rope: new THREE.MeshBasicMaterial({ color: 0x78909c }),
+    sensor: new THREE.MeshStandardMaterial({
+      color: 0x2196f3,
+      emissive: 0x2196f3,
+      emissiveIntensity: 0.5
+    }),
+    frameNormal: createFrameMaterial('normal'),
+    frameWarning: createFrameMaterial('warning'),
+    frameError: createFrameMaterial('error'),
+    netNormal: createNetMaterial('normal'),
+    netWarning: createNetMaterial('warning'),
+    netError: createNetMaterial('error'),
+    buoyNormal: createBuoyMaterial('normal'),
+    buoyWarning: createBuoyMaterial('warning'),
+    buoyError: createBuoyMaterial('error')
+  }
+}
+
+const createFrameMaterial = (status) => new THREE.LineBasicMaterial({
+  color: statusColors[status] || 0x4caf50,
+  transparent: true,
+  opacity: 0.9
+})
+
+const createNetMaterial = (status) => new THREE.MeshBasicMaterial({
+  color: statusColors[status] || 0x4caf50,
+  transparent: true,
+  opacity: 0.15,
+  side: THREE.DoubleSide,
+  wireframe: true
+})
+
+const createBuoyMaterial = (status) => new THREE.MeshStandardMaterial({
+  color: statusColors[status] || 0x4caf50,
+  emissive: statusColors[status] || 0x4caf50,
+  emissiveIntensity: 0.3
+})
+
+const getStatusMaterial = (type, status) => {
+  const key = `${type}${status.charAt(0).toUpperCase() + status.slice(1)}`
+  return sharedMaterials[key] || sharedMaterials[`${type}Normal`]
+}
+
+const disposeMesh = (object) => {
+  if (!object) return
+
+  object.traverse((child) => {
+    if (child.geometry) {
+      child.geometry.dispose()
+    }
+    if (child.material) {
+      if (Array.isArray(child.material)) {
+        child.material.forEach(m => m.dispose())
+      } else {
+        child.material.dispose()
+      }
+    }
+  })
+}
+
+const disposeAllCages = () => {
+  cageMeshes.forEach((mesh) => {
+    scene.remove(mesh)
+    disposeMesh(mesh)
+  })
+  cageMeshes.clear()
+}
+
+const createCageMesh = (cageData) => {
+  const group = new THREE.Group()
+
+  const frameGeo = new THREE.EdgesGeometry(sharedGeometries.frame)
+  const frameMat = getStatusMaterial('frame', cageData.status)
+  const frame = new THREE.LineSegments(frameGeo, frameMat)
+  group.add(frame)
+
+  const netMat = getStatusMaterial('net', cageData.status)
+  const net = new THREE.Mesh(sharedGeometries.net, netMat)
+  group.add(net)
+
+  const buoyMat = getStatusMaterial('buoy', cageData.status)
+  const cageWidth = 8
+  const cageHeight = 4
+  const cageDepth = 8
+
+  const buoyPositions = [
+    [-cageWidth / 2 + 1, cageHeight / 2 + 0.75, -cageDepth / 2 + 1],
+    [cageWidth / 2 - 1, cageHeight / 2 + 0.75, -cageDepth / 2 + 1],
+    [-cageWidth / 2 + 1, cageHeight / 2 + 0.75, cageDepth / 2 - 1],
+    [cageWidth / 2 - 1, cageHeight / 2 + 0.75, cageDepth / 2 - 1]
+  ]
+
+  buoyPositions.forEach(pos => {
+    const buoy = new THREE.Mesh(sharedGeometries.buoy, buoyMat)
+    buoy.position.set(pos[0], pos[1], pos[2])
+    buoy.castShadow = true
+    group.add(buoy)
+  })
+
+  for (let i = 0; i < 2; i++) {
+    const rope = new THREE.Mesh(sharedGeometries.rope, sharedMaterials.rope)
+    rope.position.set(
+      (i === 0 ? -1 : 1) * (cageWidth / 2 - 1),
+      cageHeight / 2 + 3.25,
+      -cageDepth / 2 + 1
+    )
+    group.add(rope)
+  }
+
+  const sensor = new THREE.Mesh(sharedGeometries.sensor, sharedMaterials.sensor)
+  sensor.position.set(0, -cageHeight / 2 - 0.5, 0)
+  group.add(sensor)
+
+  const groundY = -20
+  const cageY = groundY + cageData.depth + cageHeight / 2
+  group.position.set(cageData.x, cageY, cageData.z)
+
+  group.userData = {
+    cageId: cageData.id,
+    cageData: { ...cageData }
+  }
+
+  return group
+}
+
+const createCages = () => {
+  disposeAllCages()
+
+  props.cages.forEach(cageData => {
+    const mesh = createCageMesh(cageData)
+    scene.add(mesh)
+    cageMeshes.set(cageData.id, mesh)
+  })
+}
+
+const updateCageData = () => {
+  const idSet = new Set(props.cages.map(c => c.id))
+  const existingIds = new Set(cageMeshes.keys())
+
+  const needRebuild =
+    idSet.size !== existingIds.size ||
+    [...idSet].some(id => !existingIds.has(id))
+
+  if (needRebuild) {
+    createCages()
+    return
+  }
+
+  props.cages.forEach(cageData => {
+    const mesh = cageMeshes.get(cageData.id)
+    if (!mesh) return
+
+    mesh.userData.cageData = { ...cageData }
+
+    mesh.traverse((child) => {
+      if (child === mesh) return
+
+      if (child.material && child.material.color) {
+        const targetColor = statusColors[cageData.status] || 0x4caf50
+        if (child.geometry === sharedGeometries.net ||
+            child.geometry === sharedGeometries.buoy) {
+          child.material.color.setHex(targetColor)
+          if (child.material.emissive) {
+            child.material.emissive.setHex(targetColor)
+          }
+        }
+      }
+    })
+  })
 }
 
 const initScene = () => {
@@ -72,17 +262,24 @@ const initScene = () => {
   raycaster = new THREE.Raycaster()
   mouse = new THREE.Vector2()
 
+  initSharedResources()
+
   addLights()
   addSeabed()
   addWaterSurface()
   addGrid()
   addDepthMarkers()
+  createCages()
 
   animate()
 
-  renderer.domElement.addEventListener('mousemove', onMouseMove)
-  renderer.domElement.addEventListener('click', onMouseClick)
-  window.addEventListener('resize', onWindowResize)
+  onMouseMoveHandler = (e) => onMouseMove(e)
+  onClickHandler = (e) => onMouseClick(e)
+  onResizeHandler = () => onWindowResize()
+
+  renderer.domElement.addEventListener('mousemove', onMouseMoveHandler)
+  renderer.domElement.addEventListener('click', onClickHandler)
+  window.addEventListener('resize', onResizeHandler)
 }
 
 const addLights = () => {
@@ -92,8 +289,8 @@ const addLights = () => {
   const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8)
   directionalLight.position.set(50, 100, 50)
   directionalLight.castShadow = true
-  directionalLight.shadow.mapSize.width = 2048
-  directionalLight.shadow.mapSize.height = 2048
+  directionalLight.shadow.mapSize.width = 1024
+  directionalLight.shadow.mapSize.height = 1024
   directionalLight.shadow.camera.near = 0.5
   directionalLight.shadow.camera.far = 500
   directionalLight.shadow.camera.left = -100
@@ -174,100 +371,6 @@ const addDepthMarkers = () => {
   }
 }
 
-const createCageMesh = (cageData) => {
-  const group = new THREE.Group()
-
-  const cageWidth = 8
-  const cageHeight = 4
-  const cageDepth = 8
-
-  const frameGeometry = new THREE.BoxGeometry(cageWidth, cageHeight, cageDepth)
-  const edges = new THREE.EdgesGeometry(frameGeometry)
-  const frameMaterial = new THREE.LineBasicMaterial({
-    color: statusColors[cageData.status] || 0x4caf50,
-    transparent: true,
-    opacity: 0.9
-  })
-  const frame = new THREE.LineSegments(edges, frameMaterial)
-  group.add(frame)
-
-  const netMaterial = new THREE.MeshBasicMaterial({
-    color: statusColors[cageData.status] || 0x4caf50,
-    transparent: true,
-    opacity: 0.15,
-    side: THREE.DoubleSide,
-    wireframe: true,
-    wireframeLinewidth: 1
-  })
-  const net = new THREE.Mesh(
-    new THREE.BoxGeometry(cageWidth - 0.2, cageHeight - 0.2, cageDepth - 0.2),
-    netMaterial
-  )
-  group.add(net)
-
-  const buoyGeometry = new THREE.CylinderGeometry(0.5, 0.6, 1.5, 8)
-  const buoyMaterial = new THREE.MeshStandardMaterial({
-    color: statusColors[cageData.status] || 0x4caf50,
-    emissive: statusColors[cageData.status] || 0x4caf50,
-    emissiveIntensity: 0.3
-  })
-
-  const buoyPositions = [
-    [-cageWidth / 2 + 1, cageHeight / 2 + 0.75, -cageDepth / 2 + 1],
-    [cageWidth / 2 - 1, cageHeight / 2 + 0.75, -cageDepth / 2 + 1],
-    [-cageWidth / 2 + 1, cageHeight / 2 + 0.75, cageDepth / 2 - 1],
-    [cageWidth / 2 - 1, cageHeight / 2 + 0.75, cageDepth / 2 - 1]
-  ]
-
-  buoyPositions.forEach(pos => {
-    const buoy = new THREE.Mesh(buoyGeometry, buoyMaterial)
-    buoy.position.set(pos[0], pos[1], pos[2])
-    buoy.castShadow = true
-    group.add(buoy)
-  })
-
-  const ropeGeometry = new THREE.CylinderGeometry(0.05, 0.05, 5, 4)
-  const ropeMaterial = new THREE.MeshBasicMaterial({ color: 0x78909c })
-  for (let i = 0; i < 2; i++) {
-    const rope = new THREE.Mesh(ropeGeometry, ropeMaterial)
-    rope.position.set(
-      (i === 0 ? -1 : 1) * (cageWidth / 2 - 1),
-      cageHeight / 2 + 3.25,
-      -cageDepth / 2 + 1
-    )
-    group.add(rope)
-  }
-
-  const sensorGeometry = new THREE.SphereGeometry(0.6, 16, 16)
-  const sensorMaterial = new THREE.MeshStandardMaterial({
-    color: 0x2196f3,
-    emissive: 0x2196f3,
-    emissiveIntensity: 0.5
-  })
-  const sensor = new THREE.Mesh(sensorGeometry, sensorMaterial)
-  sensor.position.set(0, -cageHeight / 2 - 0.5, 0)
-  group.add(sensor)
-
-  const groundY = -20
-  const cageY = groundY + cageData.depth + cageHeight / 2
-  group.position.set(cageData.x, cageY, cageData.z)
-
-  group.userData = { cageData }
-
-  return group
-}
-
-const updateCages = () => {
-  cageMeshes.forEach(mesh => scene.remove(mesh))
-  cageMeshes = []
-
-  props.cages.forEach(cageData => {
-    const mesh = createCageMesh(cageData)
-    scene.add(mesh)
-    cageMeshes.push(mesh)
-  })
-}
-
 const animate = () => {
   animationId = requestAnimationFrame(animate)
   controls.update()
@@ -276,14 +379,12 @@ const animate = () => {
     waterSurface.position.y = 5 + Math.sin(Date.now() * 0.001) * 0.3
   }
 
-  cageMeshes.forEach((mesh, index) => {
-    mesh.position.y += Math.sin(Date.now() * 0.001 + index) * 0.005
-  })
-
   renderer.render(scene, camera)
 }
 
 const onMouseMove = (event) => {
+  if (!containerRef.value || !cageMeshes.size) return
+
   const rect = containerRef.value.getBoundingClientRect()
   mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1
   mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1
@@ -294,10 +395,9 @@ const onMouseMove = (event) => {
   }
 
   raycaster.setFromCamera(mouse, camera)
-  const intersects = raycaster.intersectObjects(
-    cageMeshes.flatMap(m => m.children),
-    true
-  )
+  const meshes = []
+  cageMeshes.forEach(m => meshes.push(...m.children))
+  const intersects = raycaster.intersectObjects(meshes, true)
 
   if (intersects.length > 0) {
     let obj = intersects[0].object
@@ -317,13 +417,14 @@ const onMouseMove = (event) => {
   }
 }
 
-const onMouseClick = (event) => {
+const onMouseClick = () => {
   if (hoveredCage.value) {
     emit('cage-click', hoveredCage.value)
   }
 }
 
 const onWindowResize = () => {
+  if (!containerRef.value || !camera || !renderer) return
   const container = containerRef.value
   const width = container.clientWidth
   const height = container.clientHeight
@@ -334,27 +435,64 @@ const onWindowResize = () => {
 }
 
 watch(() => props.cages, () => {
-  if (scene) {
-    updateCages()
+  if (scene && props.cages.length > 0) {
+    updateCageData()
   }
-}, { deep: true })
+})
 
 onMounted(() => {
   initScene()
-  updateCages()
 })
 
 onUnmounted(() => {
   if (animationId) {
     cancelAnimationFrame(animationId)
+    animationId = null
   }
+
+  if (onMouseMoveHandler && renderer) {
+    renderer.domElement.removeEventListener('mousemove', onMouseMoveHandler)
+    onMouseMoveHandler = null
+  }
+  if (onClickHandler && renderer) {
+    renderer.domElement.removeEventListener('click', onClickHandler)
+    onClickHandler = null
+  }
+  if (onResizeHandler) {
+    window.removeEventListener('resize', onResizeHandler)
+    onResizeHandler = null
+  }
+
+  disposeAllCages()
+
+  if (sharedGeometries) {
+    Object.values(sharedGeometries).forEach(g => g.dispose())
+    sharedGeometries = null
+  }
+  if (sharedMaterials) {
+    Object.values(sharedMaterials).forEach(m => m.dispose())
+    sharedMaterials = null
+  }
+
+  if (controls) {
+    controls.dispose()
+    controls = null
+  }
+
   if (renderer) {
     renderer.dispose()
     if (containerRef.value && renderer.domElement) {
       containerRef.value.removeChild(renderer.domElement)
     }
+    renderer = null
   }
-  window.removeEventListener('resize', onWindowResize)
+
+  scene = null
+  camera = null
+  raycaster = null
+  mouse = null
+  waterSurface = null
+
   document.body.style.cursor = 'default'
 })
 </script>

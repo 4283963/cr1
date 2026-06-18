@@ -58,15 +58,28 @@ const cages = ref([])
 const selectedCage = ref(null)
 const lastUpdateTime = ref('--')
 let refreshTimer = null
+let isFetching = false
 
 const fetchData = async () => {
+  if (isFetching) return
+  isFetching = true
   try {
     const data = await getCages()
     cages.value = data
+
+    if (selectedCage.value) {
+      const updated = data.find(c => c.id === selectedCage.value.id)
+      if (updated) {
+        selectedCage.value = { ...updated }
+      }
+    }
+
     const now = new Date()
     lastUpdateTime.value = now.toLocaleTimeString('zh-CN')
   } catch (err) {
     console.error('获取数据失败:', err)
+  } finally {
+    isFetching = false
   }
 }
 
@@ -76,7 +89,7 @@ const handleCageClick = (cage) => {
 
 onMounted(() => {
   fetchData()
-  refreshTimer = setInterval(fetchData, 5000)
+  refreshTimer = setInterval(fetchData, 10000)
 })
 
 onUnmounted(() => {
